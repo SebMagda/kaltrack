@@ -1,0 +1,679 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="KalTrack">
+<meta name="theme-color" content="#080f08">
+<title>KalTrack</title>
+<link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' rx='110' fill='%23080f08'/%3E%3Ccircle cx='256' cy='256' r='170' fill='none' stroke='%231a2a1a' stroke-width='44'/%3E%3Ccircle cx='256' cy='256' r='170' fill='none' stroke='%234ade80' stroke-width='44' stroke-dasharray='535 1069' stroke-linecap='round' transform='rotate(-90 256 256)'/%3E%3Ctext x='256' y='230' text-anchor='middle' fill='%234ade80' font-size='90' font-family='system-ui' font-weight='900'%3Ekal%3C/text%3E%3Ctext x='256' y='320' text-anchor='middle' fill='%234ade80' font-size='70' font-family='system-ui' font-weight='900'%3Etrack%3C/text%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%23080f08'/%3E%3Ccircle cx='50' cy='50' r='33' fill='none' stroke='%234ade80' stroke-width='10'/%3E%3Ctext x='50' y='58' text-anchor='middle' fill='%234ade80' font-size='24' font-family='sans-serif' font-weight='900'%3EK%3C/text%3E%3C/svg%3E">
+<style>
+  *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+  body{background:#080f08;font-family:'DM Sans',system-ui,sans-serif;overscroll-behavior:none;-webkit-overflow-scrolling:touch}
+  input,button{font-family:inherit;-webkit-appearance:none;border-radius:0}
+  ::-webkit-scrollbar{display:none}
+  @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700;800&display=swap');
+  .su{animation:su .28s cubic-bezier(.32,0,.67,0) forwards}
+  @keyframes su{from{transform:translateY(18px);opacity:0}to{transform:translateY(0);opacity:1}}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="module">
+import { createElement as h, useState, useEffect, useRef, useCallback, Fragment } from 'https://esm.sh/react@18.2.0';
+import { createRoot } from 'https://esm.sh/react-dom@18.2.0/client';
+import htm from 'https://esm.sh/htm@3.1.1';
+const html = htm.bind(h);
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DATABASE  — localStorage primary (persists on phone), window.storage backup
+// ══════════════════════════════════════════════════════════════════════════════
+const DB = (() => {
+  const P = 'kal:';
+  const parse = v => { try { return v ? JSON.parse(v) : null; } catch { return null; } };
+
+  async function lsGet(k) { return parse(localStorage.getItem(P + k)); }
+  async function lsSet(k, v) {
+    localStorage.setItem(P + k, JSON.stringify(v));
+    try { if (window.storage) await window.storage.set(P + k, JSON.stringify(v)); } catch {}
+  }
+
+  async function migrate() {
+    if (localStorage.getItem(P + '_v2')) return;
+    try {
+      if (window.storage) {
+        const keys = await window.storage.list(P);
+        for (const k of (keys?.keys || [])) {
+          const r = await window.storage.get(k);
+          if (r && !localStorage.getItem(k)) localStorage.setItem(k, r.value);
+        }
+      }
+    } catch {}
+    localStorage.setItem(P + '_v2', '1');
+  }
+
+  const DEF_PROFILE = { weight: 108, height: 183, age: 50, dailyGoal: 2400, tdee: 3067 };
+
+  return {
+    migrate,
+    defaultProfile: DEF_PROFILE,
+    async getProfile() { return await lsGet('profile') || DEF_PROFILE; },
+    async setProfile(d) { await lsSet('profile', d); },
+
+    async getDayLog(date) { return await lsGet('day:' + date) || { date, entries: [] }; },
+    async setDayLog(date, entries) { await lsSet('day:' + date, { date, entries, updatedAt: Date.now() }); },
+    async getAllDays() {
+      const days = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith(P + 'day:')) {
+          const v = parse(localStorage.getItem(k));
+          if (v) days.push(v);
+        }
+      }
+      return days.sort((a, b) => b.date.localeCompare(a.date));
+    },
+
+    async getWeightLog() { return await lsGet('weight_log') || []; },
+    async addWeightEntry(date, weight) {
+      const log = await this.getWeightLog();
+      const i = log.findIndex(e => e.date === date);
+      if (i >= 0) log[i] = { date, weight, ts: Date.now() };
+      else log.push({ date, weight, ts: Date.now() });
+      log.sort((a, b) => b.date.localeCompare(a.date));
+      await lsSet('weight_log', log);
+      return log;
+    },
+    async deleteWeightEntry(date) {
+      const log = (await this.getWeightLog()).filter(e => e.date !== date);
+      await lsSet('weight_log', log);
+      return log;
+    },
+
+    async exportAll() {
+      const data = {};
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith(P)) data[k] = localStorage.getItem(k);
+      }
+      return data;
+    },
+  };
+})();
+
+// ══════════════════════════════════════════════════════════════════════════════
+// CONSTANTS
+// ══════════════════════════════════════════════════════════════════════════════
+const MEALS = [
+  { id: 'breakfast', label: 'Śniadanie', icon: '🌅', time: '7:00',  goal: 600 },
+  { id: 'lunch',     label: 'Obiad',     icon: '☀️', time: '14:30', goal: 960 },
+  { id: 'dinner',    label: 'Kolacja',   icon: '🌙', time: '19:30', goal: 840 },
+];
+const VEGGIES = [
+  '🥦 Brokuły (30 kcal/100g) — gotowane na parze, idealne jako wypełniacz',
+  '🥒 Ogórek (15 kcal/100g) — praktycznie zero kalorii, świetny chrupak',
+  '🥗 Rukola, szpinak, sałata (15–20 kcal/100g) — baza każdego posiłku',
+  '🍅 Pomidory (18 kcal/100g) — pełne likopenu, sycące',
+  '🫑 Papryka (30 kcal/100g) — bogata w wit. C, chrupiąca na surowo',
+  '🥬 Cukinia, kalafior (25 kcal/100g) — pieczone lub na parze',
+  '🧄 Czosnek i cebula — zero kalorii, maximum smaku',
+];
+const C = {
+  bg:'#080f08', card:'#0f1a0f', card2:'#1a2a1a', border:'#1f2a1f',
+  green:'#4ade80', greenDim:'#86efac', greenDark:'#0a120a',
+  text:'#e5e7eb', mid:'#9ca3af', dim:'#6b7280', faint:'#4b5563',
+  red:'#ff5a5a', blue:'#60a5fa', yellow:'#fbbf24', orange:'#f87171',
+};
+const today = () => new Date().toISOString().slice(0, 10);
+const fmt = n => Math.round(n).toLocaleString('pl-PL');
+const inp = extra => ({ background:C.card2, border:'1px solid #2d3d2d', borderRadius:12, padding:'14px 16px', color:C.text, fontSize:15, outline:'none', width:'100%', boxSizing:'border-box', fontFamily:'inherit', ...extra });
+
+// ══════════════════════════════════════════════════════════════════════════════
+// COMPONENTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+function Ring({ consumed, goal }) {
+  const r = 70, circ = 2 * Math.PI * r, pct = Math.min(consumed / goal, 1);
+  const over = consumed > goal, rem = goal - consumed;
+  return html`
+    <div style=${{ position:'relative', width:180, height:180, margin:'0 auto' }}>
+      <svg width=${180} height=${180} style=${{ transform:'rotate(-90deg)' }}>
+        <circle cx=${90} cy=${90} r=${r} fill="none" stroke=${C.card2} strokeWidth=${14}/>
+        <circle cx=${90} cy=${90} r=${r} fill="none" stroke=${over?C.red:C.green} strokeWidth=${14}
+          strokeDasharray=${`${circ*pct} ${circ}`} strokeLinecap="round"
+          style=${{ transition:'stroke-dasharray 0.6s cubic-bezier(.4,0,.2,1)' }}/>
+      </svg>
+      <div style=${{ position:'absolute', top:'50%', left:'50%', transform:'translate(-50%,-50%)', textAlign:'center' }}>
+        <div style=${{ fontSize:11, color:C.dim, letterSpacing:1, textTransform:'uppercase' }}>${over?'przekroczono':'pozostało'}</div>
+        <div style=${{ fontSize:32, fontWeight:800, color:over?C.red:C.green, lineHeight:1.1 }}>${fmt(Math.abs(rem))}</div>
+        <div style=${{ fontSize:11, color:C.dim }}>kcal</div>
+      </div>
+    </div>`;
+}
+
+function MacroBar({ label, value, max, color }) {
+  return html`
+    <div style=${{ flex:1 }}>
+      <div style=${{ display:'flex', justifyContent:'space-between', marginBottom:4 }}>
+        <span style=${{ fontSize:10, color:C.mid, textTransform:'uppercase', letterSpacing:0.5 }}>${label}</span>
+        <span style=${{ fontSize:10, color:C.text }}>${Math.round(value)}g</span>
+      </div>
+      <div style=${{ height:5, background:C.card2, borderRadius:99 }}>
+        <div style=${{ height:5, width:`${Math.min(value/max*100,100)}%`, background:color, borderRadius:99, transition:'width 0.5s ease' }}/>
+      </div>
+    </div>`;
+}
+
+function SuggestionPanel({ mealId, allEntries, remainingCal, nextMeal }) {
+  const [sug, setSug] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [open, setOpen] = useState(false);
+  const mealEnt = allEntries.filter(e => e.mealId === mealId);
+  const mealCal = mealEnt.reduce((s, e) => s + (e.calories || 0), 0);
+  const mealProt = mealEnt.reduce((s, e) => s + (e.protein || 0), 0);
+
+  const load = async () => {
+    setOpen(true);
+    if (sug) return;
+    setLoading(true);
+    try {
+      const eaten = mealEnt.map(e => `${e.name} (${e.calories} kcal)`).join(', ') || 'brak';
+      const mN = mealId==='breakfast'?'śniadaniu':mealId==='lunch'?'obiedzie':'kolacji';
+      const prompt = `Jesteś dietetykiem. Pacjent: mężczyzna, 50 lat, 108kg, cel 2400 kcal/dzień.
+Zjedzone w ${mN}: ${eaten}. Kcal: ${mealCal}. Białko: ${Math.round(mealProt)}g.
+Pozostało: ${remainingCal} kcal.${nextMeal?` Następny posiłek: ${nextMeal.label} (${nextMeal.goal} kcal).`:' Ostatni posiłek.'}
+TYLKO JSON (bez markdown):
+{"ocena":"1 zdanie","emoji":"✅/⚠️/❌","dojedz":[{"co":"","kcal":0,"info":""}],"nastepny":[{"nazwa":"","kcal":0,"makro":"B:Xg W:Xg T:Xg"}],"warzywa":[{"co":"","kcal":"","tip":""}]}
+Max 2 pozycje w każdej tablicy.`;
+      const r = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 1000, messages: [{ role:'user', content:prompt }] }),
+      });
+      const d = await r.json();
+      const txt = d.content?.map(b => b.text || '').join('');
+      setSug(JSON.parse(txt.replace(/```json|```/g, '').trim()));
+    } catch { setSug({ error: true }); }
+    setLoading(false);
+  };
+
+  if (!mealEnt.length) return null;
+  return html`
+    <div>
+      <button onClick=${load} style=${{ width:'100%', padding:'10px 16px', background:'none', border:'1px dashed #2d4a2d', borderRadius:12, color:C.green, fontSize:13, fontWeight:600, cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', gap:6 }}>
+        🤖 Co powinienem teraz zjeść?
+      </button>
+      ${open && html`
+        <div class="su" style=${{ marginTop:8, background:'#0a160a', border:`1px solid ${C.border}`, borderRadius:14, padding:14, fontSize:13 }}>
+          ${loading
+            ? html`<div style=${{ color:C.dim, textAlign:'center', padding:'12px 0' }}>⏳ Analizuję Twój posiłek...</div>`
+            : sug?.error
+              ? html`<div style=${{ color:C.red }}>Błąd — spróbuj ponownie</div>`
+              : sug && html`
+                <div style=${{ display:'flex', gap:8, alignItems:'flex-start', marginBottom:12, padding:'10px 12px', background:C.card2, borderRadius:10 }}>
+                  <span style=${{ fontSize:18 }}>${sug.emoji}</span>
+                  <span style=${{ color:C.mid, lineHeight:1.4 }}>${sug.ocena}</span>
+                </div>
+                ${sug.dojedz?.length && html`
+                  <div style=${{ marginBottom:12 }}>
+                    <div style=${{ fontSize:11, color:C.dim, textTransform:'uppercase', letterSpacing:0.8, marginBottom:6 }}>🍽️ Dojedz teraz</div>
+                    ${sug.dojedz.map((it,i) => html`
+                      <div key=${i} style=${{ display:'flex', justifyContent:'space-between', padding:'7px 0', borderBottom:`1px solid ${C.border}` }}>
+                        <div>
+                          <div style=${{ color:C.text, fontWeight:600 }}>${it.co}</div>
+                          <div style=${{ color:C.dim, fontSize:11 }}>${it.info}</div>
+                        </div>
+                        <div style=${{ color:C.green, fontWeight:700, minWidth:50, textAlign:'right' }}>${it.kcal} kcal</div>
+                      </div>`)}
+                  </div>`}
+                ${sug.nastepny?.length && nextMeal && html`
+                  <div style=${{ marginBottom:12 }}>
+                    <div style=${{ fontSize:11, color:C.dim, textTransform:'uppercase', letterSpacing:0.8, marginBottom:6 }}>⏭️ Na ${nextMeal.label}</div>
+                    ${sug.nastepny.map((it,i) => html`
+                      <div key=${i} style=${{ padding:'7px 0', borderBottom:`1px solid ${C.border}` }}>
+                        <div style=${{ display:'flex', justifyContent:'space-between' }}>
+                          <span style=${{ color:C.text, fontWeight:600 }}>${it.nazwa}</span>
+                          <span style=${{ color:C.yellow, fontWeight:700 }}>${it.kcal} kcal</span>
+                        </div>
+                        <div style=${{ color:C.dim, fontSize:11, marginTop:2 }}>${it.makro}</div>
+                      </div>`)}
+                  </div>`}
+                ${sug.warzywa?.length && html`
+                  <div>
+                    <div style=${{ fontSize:11, color:C.dim, textTransform:'uppercase', letterSpacing:0.8, marginBottom:6 }}>🥦 Warzywa — jedz bez limitu</div>
+                    ${sug.warzywa.map((v,i) => html`
+                      <div key=${i} style=${{ padding:'7px 0', borderBottom:i<sug.warzywa.length-1?`1px solid ${C.border}`:'none' }}>
+                        <div style=${{ display:'flex', justifyContent:'space-between' }}>
+                          <span style=${{ color:C.greenDim, fontWeight:600 }}>${v.co}</span>
+                          <span style=${{ color:C.faint, fontSize:11 }}>${v.kcal}</span>
+                        </div>
+                        <div style=${{ color:C.faint, fontSize:11 }}>${v.tip}</div>
+                      </div>`)}
+                  </div>`}
+                <button onClick=${()=>{setSug(null); setTimeout(load,50);}} style=${{ marginTop:10, background:'none', border:'none', color:C.faint, fontSize:11, cursor:'pointer' }}>
+                  🔄 Odśwież
+                </button>`}
+        </div>`}
+    </div>`;
+}
+
+function AddFoodModal({ onClose, onAdd }) {
+  const [mode, setMode] = useState('text');
+  const [name, setName] = useState('');
+  const [wt, setWt] = useState('');
+  const [b64, setB64] = useState(null);
+  const [preview, setPreview] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState(null);
+  const fileRef = useRef();
+
+  const handleFile = e => {
+    const f = e.target.files[0]; if (!f) return;
+    const reader = new FileReader();
+    reader.onload = ev => { setB64(ev.target.result.split(',')[1]); setPreview(ev.target.result); };
+    reader.readAsDataURL(f);
+  };
+
+  const analyze = async () => {
+    setLoading(true); setError(null); setResult(null);
+    try {
+      let messages;
+      if (mode === 'photo' && b64) {
+        messages = [{ role:'user', content:[
+          { type:'image', source:{ type:'base64', media_type:'image/jpeg', data:b64 }},
+          { type:'text', text:`Dietetyk. Przeanalizuj potrawę${wt?` (${wt}g)`:''}.TYLKO JSON:\n{"name":"nazwa","calories":n,"protein":g,"carbs":g,"fat":g,"confidence":"wysoki/średni/niski"}` },
+        ]}];
+      } else {
+        const p = wt
+          ? `Dietetyk. Oblicz dla: ${name}, ${wt}g. TYLKO JSON:\n{"name":"${name}","calories":n,"protein":g,"carbs":g,"fat":g,"confidence":"wysoki/średni/niski"}`
+          : `Dietetyk. Typowa porcja: ${name}. TYLKO JSON:\n{"name":"${name}","calories":n,"protein":g,"carbs":g,"fat":g,"weight":g,"confidence":"wysoki/średni/niski"}`;
+        messages = [{ role:'user', content:p }];
+      }
+      const resp = await fetch('https://api.anthropic.com/v1/messages', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ model:'claude-sonnet-4-20250514', max_tokens:1000, messages }),
+      });
+      const d = await resp.json();
+      const txt = d.content?.map(b => b.text || '').join('');
+      setResult(JSON.parse(txt.replace(/```json|```/g,'').trim()));
+    } catch { setError('Nie udało się przeanalizować. Spróbuj ponownie.'); }
+    setLoading(false);
+  };
+
+  const confirm = () => {
+    if (!result) return;
+    onAdd({ id:Date.now(), name:result.name, calories:result.calories, protein:result.protein||0, carbs:result.carbs||0, fat:result.fat||0, weight:result.weight||wt||null, time:new Date().toLocaleTimeString('pl-PL',{hour:'2-digit',minute:'2-digit'}) });
+    onClose();
+  };
+
+  const canGo = mode === 'photo' ? !!b64 : !!name.trim();
+
+  return html`
+    <div style=${{ position:'fixed', inset:0, background:'rgba(0,0,0,0.85)', zIndex:100, display:'flex', alignItems:'flex-end', justifyContent:'center' }} onClick=${onClose}>
+      <div class="su" onClick=${e=>e.stopPropagation()} style=${{ background:C.card, borderRadius:'24px 24px 0 0', width:'100%', maxWidth:480, padding:'24px 20px 40px', borderTop:`1px solid ${C.border}` }}>
+        <div style=${{ width:36, height:4, background:C.card2, borderRadius:99, margin:'0 auto 20px' }}/>
+        <div style=${{ fontSize:17, fontWeight:700, color:C.text, marginBottom:16 }}>Dodaj produkt</div>
+        <div style=${{ display:'flex', gap:8, marginBottom:20 }}>
+          ${['text','photo'].map(m => html`
+            <button key=${m} onClick=${()=>{setMode(m);setResult(null);}} style=${{ flex:1, padding:'10px 0', borderRadius:12, background:mode===m?C.green:C.card2, color:mode===m?C.greenDark:C.mid, border:'none', fontWeight:700, fontSize:13, cursor:'pointer' }}>
+              ${m==='text'?'✏️ Wpisz':'📸 Zdjęcie'}
+            </button>`)}
+        </div>
+        ${mode==='text' ? html`
+          <div style=${{ display:'flex', flexDirection:'column', gap:10 }}>
+            <input value=${name} onInput=${e=>setName(e.target.value)} placeholder="np. kurczak z ryżem, jajecznica..." style=${inp({})} onKeyDown=${e=>e.key==='Enter'&&canGo&&analyze()}/>
+            <input value=${wt} onInput=${e=>setWt(e.target.value)} placeholder="Waga w gramach (opcjonalnie)" type="number" style=${inp({})}/>
+          </div>` : html`
+          <div>
+            <input ref=${fileRef} type="file" accept="image/*" capture="environment" onChange=${handleFile} style=${{ display:'none' }}/>
+            ${preview ? html`
+              <div style=${{ position:'relative' }}>
+                <img src=${preview} style=${{ width:'100%', height:180, objectFit:'cover', borderRadius:16 }}/>
+                <button onClick=${()=>{setB64(null);setPreview(null);setResult(null);}} style=${{ position:'absolute', top:8, right:8, background:'rgba(0,0,0,0.7)', border:'none', color:'#fff', borderRadius:99, width:30, height:30, cursor:'pointer', fontSize:14 }}>✕</button>
+              </div>` : html`
+              <button onClick=${()=>fileRef.current.click()} style=${{ width:'100%', height:140, background:C.card2, border:'2px dashed #2d3d2d', borderRadius:16, color:C.dim, fontSize:14, cursor:'pointer', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:8 }}>
+                <span style=${{ fontSize:32 }}>📸</span><span>Zrób zdjęcie lub wybierz z galerii</span>
+              </button>`}
+            ${preview && html`<input value=${wt} onInput=${e=>setWt(e.target.value)} placeholder="Waga w gramach (opcjonalnie)" type="number" style=${inp({marginTop:10})}/>`}
+          </div>`}
+        ${error && html`<div style=${{ color:C.red, fontSize:13, marginTop:10 }}>${error}</div>`}
+        ${result && html`
+          <div style=${{ marginTop:16, background:C.card2, borderRadius:16, padding:16 }}>
+            <div style=${{ fontWeight:700, color:C.green, fontSize:15, marginBottom:6 }}>${result.name}</div>
+            <div style=${{ fontSize:28, fontWeight:800, color:C.text }}>${result.calories} <span style=${{ fontSize:14, color:C.dim, fontWeight:400 }}>kcal</span></div>
+            <div style=${{ display:'flex', gap:16, marginTop:8 }}>
+              ${[['B',result.protein,C.blue],['W',result.carbs,C.yellow],['T',result.fat,C.orange]].map(([l,v,c]) => html`
+                <div key=${l} style=${{ fontSize:12, color:C.mid }}><span style=${{ color:c, fontWeight:700 }}>${l}</span> ${Math.round(v)}g</div>`)}
+              <div style=${{ fontSize:11, color:C.dim, marginLeft:'auto' }}>pewność: ${result.confidence}</div>
+            </div>
+          </div>`}
+        <div style=${{ display:'flex', gap:10, marginTop:20 }}>
+          ${!result ? html`
+            <button onClick=${analyze} disabled=${!canGo||loading} style=${{ flex:1, padding:'15px 0', borderRadius:14, background:canGo&&!loading?C.green:C.card2, color:canGo&&!loading?C.greenDark:C.faint, border:'none', fontWeight:800, fontSize:15, cursor:canGo&&!loading?'pointer':'default' }}>
+              ${loading?'⏳ Analizuję...':'🤖 Analizuj AI'}
+            </button>` : html`
+            <button onClick=${()=>setResult(null)} style=${{ padding:'15px 20px', borderRadius:14, background:C.card2, color:C.mid, border:'none', fontWeight:700, fontSize:14, cursor:'pointer' }}>Popraw</button>
+            <button onClick=${confirm} style=${{ flex:1, padding:'15px 0', borderRadius:14, background:C.green, color:C.greenDark, border:'none', fontWeight:800, fontSize:15, cursor:'pointer' }}>✓ Dodaj</button>`}
+        </div>
+      </div>
+    </div>`;
+}
+
+function HistoryScreen({ onBack, dailyGoal }) {
+  const [days, setDays] = useState([]);
+  useEffect(() => { DB.getAllDays().then(setDays); }, []);
+  const totalDef = days.reduce((s, d) => { const c = (d.entries||[]).reduce((ss,e)=>ss+(e.calories||0),0); return s+(dailyGoal-c); }, 0);
+  return html`
+    <div style=${{ minHeight:'100vh', background:C.bg, padding:'24px 16px 100px' }}>
+      <div style=${{ display:'flex', alignItems:'center', gap:12, marginBottom:20 }}>
+        <button onClick=${onBack} style=${{ background:C.card, border:'none', color:C.green, borderRadius:10, padding:'8px 12px', cursor:'pointer', fontSize:16 }}>←</button>
+        <span style=${{ color:C.text, fontWeight:700, fontSize:18 }}>Historia posiłków</span>
+      </div>
+      ${days.length>0 && html`
+        <div style=${{ background:C.card, borderRadius:16, padding:16, marginBottom:16, display:'flex', gap:12 }}>
+          ${[['Dni',days.length,C.green],['Łączny deficyt',`${fmt(Math.abs(totalDef))} kcal`,totalDef>0?C.green:C.red]].map(([l,v,c])=>html`
+            <div key=${l} style=${{ flex:1, textAlign:'center' }}>
+              <div style=${{ fontSize:11, color:C.dim, textTransform:'uppercase', letterSpacing:0.5 }}>${l}</div>
+              <div style=${{ fontWeight:800, fontSize:20, color:c, marginTop:2 }}>${v}</div>
+            </div>`)}
+        </div>`}
+      ${days.length===0
+        ? html`<div style=${{ color:C.faint, textAlign:'center', marginTop:80 }}>Brak historii — zacznij logować!</div>`
+        : days.map(d => {
+            const total = (d.entries||[]).reduce((s,e)=>s+(e.calories||0),0);
+            const diff = total - dailyGoal;
+            return html`
+              <div key=${d.date} style=${{ background:C.card, borderRadius:16, padding:16, marginBottom:10 }}>
+                <div style=${{ display:'flex', justifyContent:'space-between', marginBottom:8 }}>
+                  <div>
+                    <span style=${{ color:C.mid, fontSize:13 }}>${d.date}</span>
+                    <span style=${{ fontSize:11, color:C.faint, marginLeft:8 }}>${(d.entries||[]).length} wpisów</span>
+                  </div>
+                  <span style=${{ color:total>dailyGoal?C.red:C.green, fontWeight:700 }}>${fmt(total)} kcal</span>
+                </div>
+                <div style=${{ height:6, background:C.card2, borderRadius:99 }}>
+                  <div style=${{ height:6, width:`${Math.min(total/dailyGoal*100,100)}%`, background:total>dailyGoal?C.red:C.green, borderRadius:99 }}/>
+                </div>
+                <div style=${{ fontSize:11, color:C.faint, marginTop:6 }}>
+                  ${diff>0?`⚠️ +${fmt(diff)} kcal nadwyżki`:`✅ ${fmt(Math.abs(diff))} kcal deficytu`}
+                </div>
+              </div>`;
+          })}
+    </div>`;
+}
+
+function WeightLogScreen({ onBack }) {
+  const [log, setLog] = useState([]);
+  const [date, setDate] = useState(today());
+  const [wt, setWt] = useState('');
+  useEffect(() => { DB.getWeightLog().then(setLog); }, []);
+
+  const add = async () => {
+    const w = parseFloat(wt); if (isNaN(w)||w<30||w>400) return;
+    setLog(await DB.addWeightEntry(date, w)); setWt('');
+  };
+  const del = async d => setLog(await DB.deleteWeightEntry(d));
+
+  const chartData = log.slice(0,14).reverse();
+  const minW = chartData.length ? Math.min(...chartData.map(e=>e.weight))-0.5 : 50;
+  const maxW = chartData.length ? Math.max(...chartData.map(e=>e.weight))+0.5 : 120;
+  const startW = 108, curW = log.length ? log[0].weight : startW, lost = startW - curW;
+
+  return html`
+    <div style=${{ minHeight:'100vh', background:C.bg, padding:'24px 16px 100px' }}>
+      <div style=${{ display:'flex', alignItems:'center', gap:12, marginBottom:20 }}>
+        <button onClick=${onBack} style=${{ background:C.card, border:'none', color:C.green, borderRadius:10, padding:'8px 12px', cursor:'pointer', fontSize:16 }}>←</button>
+        <span style=${{ color:C.text, fontWeight:700, fontSize:18 }}>Dziennik wagi</span>
+      </div>
+      <div style=${{ display:'flex', gap:10, marginBottom:16 }}>
+        ${[['Start',`${startW} kg`,C.mid],['Teraz',`${curW} kg`,C.green],['Strata',`${lost>0?'-':''}${Math.abs(lost).toFixed(1)} kg`,lost>0?C.green:C.red]].map(([l,v,c])=>html`
+          <div key=${l} style=${{ flex:1, background:C.card, borderRadius:14, padding:'12px 8px', textAlign:'center' }}>
+            <div style=${{ fontSize:10, color:C.dim, textTransform:'uppercase', letterSpacing:0.5 }}>${l}</div>
+            <div style=${{ fontWeight:800, fontSize:18, color:c, marginTop:2 }}>${v}</div>
+          </div>`)}
+      </div>
+      ${chartData.length>1 && html`
+        <div style=${{ background:C.card, borderRadius:16, padding:16, marginBottom:16 }}>
+          <div style=${{ fontSize:11, color:C.dim, marginBottom:8, textTransform:'uppercase', letterSpacing:0.5 }}>Trend wagi</div>
+          <svg width="100%" height=${80} viewBox="0 0 300 80" style=${{ overflow:'visible' }}>
+            <polyline
+              points=${chartData.map((e,i)=>`${i/(chartData.length-1)*300},${80-(e.weight-minW)/(maxW-minW)*80}`).join(' ')}
+              fill="none" stroke=${C.green} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round"/>
+            ${chartData.map((e,i)=>html`<circle key=${i} cx=${i/(chartData.length-1)*300} cy=${80-(e.weight-minW)/(maxW-minW)*80} r="4" fill=${C.green}/>`)}
+          </svg>
+        </div>`}
+      <div style=${{ background:C.card, borderRadius:16, padding:16, marginBottom:16 }}>
+        <div style=${{ fontSize:13, color:C.mid, marginBottom:12, fontWeight:600 }}>➕ Dodaj pomiar</div>
+        <div style=${{ display:'flex', gap:8 }}>
+          <input type="date" value=${date} onInput=${e=>setDate(e.target.value)} style=${inp({flex:1})}/>
+          <input type="number" step="0.1" value=${wt} onInput=${e=>setWt(e.target.value)} placeholder="kg" style=${inp({width:80})} onKeyDown=${e=>e.key==='Enter'&&add()}/>
+          <button onClick=${add} disabled=${!wt} style=${{ background:C.green, border:'none', color:C.greenDark, borderRadius:12, padding:'12px 16px', fontWeight:800, fontSize:14, cursor:'pointer' }}>OK</button>
+        </div>
+      </div>
+      ${log.map(e=>html`
+        <div key=${e.date} style=${{ display:'flex', justifyContent:'space-between', alignItems:'center', padding:'12px 16px', background:C.card, borderRadius:14, marginBottom:8 }}>
+          <span style=${{ color:C.mid, fontSize:13 }}>${e.date}</span>
+          <div style=${{ display:'flex', alignItems:'center', gap:12 }}>
+            <span style=${{ fontWeight:800, color:C.text, fontSize:17 }}>${e.weight} kg</span>
+            <button onClick=${()=>del(e.date)} style=${{ background:'none', border:'none', color:C.faint, cursor:'pointer', fontSize:16 }}>✕</button>
+          </div>
+        </div>`)}
+      ${!log.length && html`<div style=${{ color:C.faint, textAlign:'center', marginTop:40 }}>Brak pomiarów. Zacznij śledzić wagę!</div>`}
+    </div>`;
+}
+
+function ProfileScreen({ onBack, profile }) {
+  const [showInst, setShowInst] = useState(false);
+
+  const exportData = async () => {
+    const data = await DB.exportAll();
+    const blob = new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href=url; a.download=`kaltrack_${today()}.json`; a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  return html`
+    <div style=${{ minHeight:'100vh', background:C.bg, padding:'24px 16px 100px' }}>
+      <div style=${{ display:'flex', alignItems:'center', gap:12, marginBottom:20 }}>
+        <button onClick=${onBack} style=${{ background:C.card, border:'none', color:C.green, borderRadius:10, padding:'8px 12px', cursor:'pointer', fontSize:16 }}>←</button>
+        <span style=${{ color:C.text, fontWeight:700, fontSize:18 }}>Profil & Ustawienia</span>
+      </div>
+
+      <button onClick=${()=>setShowInst(s=>!s)} style=${{ width:'100%', background:'linear-gradient(135deg,#0f2a1a,#1a3a2a)', border:`1px solid ${C.green}`, borderRadius:16, padding:'14px 16px', marginBottom:12, cursor:'pointer', textAlign:'left', fontFamily:'inherit' }}>
+        <div style=${{ color:C.green, fontWeight:700, fontSize:14 }}>📱 Dodaj ikonę do ekranu telefonu</div>
+        <div style=${{ color:C.dim, fontSize:12, marginTop:4 }}>Instrukcje ${showInst?'▲':'▼'}</div>
+      </button>
+      ${showInst && html`
+        <div style=${{ background:C.card, borderRadius:14, padding:16, marginBottom:14, fontSize:13, color:C.mid, lineHeight:1.7 }}>
+          <div style=${{ color:C.text, fontWeight:700, marginBottom:6 }}>🍎 iPhone (Safari):</div>
+          1. Otwórz w <strong style=${{ color:C.greenDim }}>Safari</strong><br/>
+          2. Tapnij ikonę Udostępnij (kwadrat ze strzałką ↑)<br/>
+          3. Wybierz <strong>"Dodaj do ekranu głównego"</strong><br/>
+          4. Zatwierdź — gotowe! 🎉<br/><br/>
+          <div style=${{ color:C.text, fontWeight:700, marginBottom:6 }}>🤖 Android (Chrome):</div>
+          1. Otwórz w <strong style=${{ color:C.greenDim }}>Chrome</strong><br/>
+          2. Menu ⋮ → <strong>"Dodaj do ekranu głównego"</strong><br/>
+          3. Zatwierdź — gotowe! 🎉
+        </div>`}
+
+      <div style=${{ background:C.card, borderRadius:16, padding:16, marginBottom:10 }}>
+        <div style=${{ fontSize:11, color:C.dim, marginBottom:10, textTransform:'uppercase', letterSpacing:0.8 }}>Makroskładniki dzienne</div>
+        <div style=${{ display:'flex', gap:8 }}>
+          ${[['Białko','180g',C.blue,'30%'],['Węgle','270g',C.yellow,'45%'],['Tłuszcze','67g',C.orange,'25%']].map(([l,v,c,p])=>html`
+            <div key=${l} style=${{ flex:1, background:C.card2, borderRadius:12, padding:'10px 8px', textAlign:'center' }}>
+              <div style=${{ fontSize:17, fontWeight:800, color:c }}>${v}</div>
+              <div style=${{ fontSize:10, color:C.dim }}>${l}</div>
+              <div style=${{ fontSize:10, color:C.faint }}>${p}</div>
+            </div>`)}
+        </div>
+      </div>
+
+      ${[['Cel dzienny',`${profile.dailyGoal} kcal`],['TDEE',`${profile.tdee} kcal`],['Deficyt',`${profile.tdee-profile.dailyGoal} kcal/dzień`],['Tempo utraty','~0,75 kg/tydzień'],['Cel 10 kg w','~13 tygodni'],['Waga startowa','108 kg'],['Wzrost',`${profile.height} cm`],['Wiek',`${profile.age} lat`]].map(([l,v])=>html`
+        <div key=${l} style=${{ display:'flex', justifyContent:'space-between', padding:'13px 16px', background:C.card, borderRadius:14, marginBottom:8 }}>
+          <span style=${{ color:C.mid, fontSize:14 }}>${l}</span>
+          <span style=${{ color:C.text, fontWeight:700, fontSize:14 }}>${v}</span>
+        </div>`)}
+
+      <div style=${{ background:C.card, borderRadius:16, padding:16, marginTop:8 }}>
+        <div style=${{ fontSize:12, color:C.green, fontWeight:700, marginBottom:8 }}>📋 ZASADY DIETY</div>
+        <div style=${{ fontSize:13, color:C.mid, lineHeight:1.8 }}>
+          🕖 Śniadanie: 7:00 (600 kcal)<br/>
+          🕑 Obiad: 14:30 (960 kcal)<br/>
+          🕖 Kolacja: 19:30 (840 kcal)<br/><br/>
+          🥩 Dużo białka — jajka, kurczak, ryby, twaróg<br/>
+          🥦 Warzywa jako wypełniacz — bez limitu<br/>
+          💧 Min. 2L wody dziennie<br/>
+          🚫 Ogranicz cukier i przetworzone jedzenie<br/>
+          🌙 Ostatni posiłek przed 20:00
+        </div>
+      </div>
+
+      <button onClick=${exportData} style=${{ width:'100%', marginTop:12, background:C.card, border:`1px solid ${C.border}`, borderRadius:14, padding:'13px 0', color:C.mid, fontSize:13, cursor:'pointer' }}>
+        💾 Eksportuj dane (JSON backup)
+      </button>
+    </div>`;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MAIN APP
+// ══════════════════════════════════════════════════════════════════════════════
+function App() {
+  const [screen, setScreen] = useState('main');
+  const [entries, setEntries] = useState([]);
+  const [profile, setProfile] = useState(DB.defaultProfile);
+  const [addingMeal, setAddingMeal] = useState(null);
+  const [vegIdx, setVegIdx] = useState(0);
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      await DB.migrate();
+      const [prof, log] = await Promise.all([DB.getProfile(), DB.getDayLog(today())]);
+      setProfile(prof);
+      setEntries(log.entries || []);
+      setReady(true);
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (!ready) return;
+    DB.setDayLog(today(), entries);
+  }, [entries, ready]);
+
+  const addEntry = useCallback((mealId, food) => setEntries(p => [...p, {...food, mealId}]), []);
+  const removeEntry = useCallback(id => setEntries(p => p.filter(e => e.id !== id)), []);
+
+  const totalCal  = entries.reduce((s,e) => s+(e.calories||0), 0);
+  const totalProt = entries.reduce((s,e) => s+(e.protein||0), 0);
+  const totalCarb = entries.reduce((s,e) => s+(e.carbs||0), 0);
+  const totalFat  = entries.reduce((s,e) => s+(e.fat||0), 0);
+
+  const nav = [['🏠','Dziś','main'],['📊','Historia','history'],['⚖️','Waga','weight'],['⚙️','Profil','profile']];
+
+  if (screen==='history') return html`<${HistoryScreen} onBack=${()=>setScreen('main')} dailyGoal=${profile.dailyGoal}/>`;
+  if (screen==='weight')  return html`<${WeightLogScreen} onBack=${()=>setScreen('main')}/>`;
+  if (screen==='profile') return html`<${ProfileScreen} onBack=${()=>setScreen('main')} profile=${profile}/>`;
+
+  return html`
+    <div style=${{ minHeight:'100vh', background:C.bg, maxWidth:480, margin:'0 auto', paddingBottom:90 }}>
+
+      <div style=${{ padding:'20px 20px 0', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+        <div>
+          <div style=${{ fontSize:11, color:C.faint, textTransform:'uppercase', letterSpacing:1.5 }}>
+            ${new Date().toLocaleDateString('pl-PL',{weekday:'long',day:'numeric',month:'long'})}
+          </div>
+          <div style=${{ fontSize:20, fontWeight:800, color:C.text, marginTop:2 }}>Mój dzień</div>
+        </div>
+        <div style=${{ background:C.card, borderRadius:12, padding:'6px 12px', display:'flex', alignItems:'center', gap:6 }}>
+          <div style=${{ width:8, height:8, borderRadius:99, background:C.green }}/>
+          <span style=${{ fontSize:12, color:C.green, fontWeight:700 }}>localStorage ✓</span>
+        </div>
+      </div>
+
+      <div style=${{ padding:'28px 20px 16px' }}>
+        <${Ring} consumed=${totalCal} goal=${profile.dailyGoal}/>
+        <div style=${{ display:'flex', justifyContent:'center', gap:24, marginTop:16 }}>
+          <div style=${{ textAlign:'center' }}>
+            <div style=${{ fontSize:11, color:C.dim, textTransform:'uppercase', letterSpacing:0.5 }}>cel</div>
+            <div style=${{ fontWeight:800, color:C.text, fontSize:18 }}>${fmt(profile.dailyGoal)}</div>
+          </div>
+          <div style=${{ width:1, background:C.border }}/>
+          <div style=${{ textAlign:'center' }}>
+            <div style=${{ fontSize:11, color:C.dim, textTransform:'uppercase', letterSpacing:0.5 }}>zjedzone</div>
+            <div style=${{ fontWeight:800, color:C.text, fontSize:18 }}>${fmt(totalCal)}</div>
+          </div>
+        </div>
+      </div>
+
+      <div style=${{ margin:'0 16px 12px', background:C.card, borderRadius:18, padding:'14px 16px' }}>
+        <div style=${{ display:'flex', gap:12 }}>
+          <${MacroBar} label="Białko" value=${totalProt} max=${180} color=${C.blue}/>
+          <${MacroBar} label="Węgle"  value=${totalCarb} max=${270} color=${C.yellow}/>
+          <${MacroBar} label="Tłuszcz" value=${totalFat} max=${67} color=${C.orange}/>
+        </div>
+      </div>
+
+      <div style=${{ margin:'0 16px 14px', background:'#0a1f0a', border:'1px solid #1a3a1a', borderRadius:14, padding:'12px 14px', display:'flex', gap:10, alignItems:'center' }}>
+        <div style=${{ flex:1, color:C.greenDim, fontSize:13, lineHeight:1.4 }}>${VEGGIES[vegIdx]}</div>
+        <button onClick=${()=>setVegIdx(i=>(i+1)%VEGGIES.length)} style=${{ background:'none', border:'none', color:C.faint, cursor:'pointer', fontSize:18, flexShrink:0 }}>🔄</button>
+      </div>
+
+      ${MEALS.map((meal, idx) => {
+        const mEnt = entries.filter(e => e.mealId === meal.id);
+        const mCal = mEnt.reduce((s,e) => s+(e.calories||0), 0);
+        const over = mCal > meal.goal;
+        return html`
+          <div key=${meal.id} style=${{ margin:'0 16px 14px', background:C.card, borderRadius:18, overflow:'hidden' }}>
+            <div style=${{ display:'flex', alignItems:'center', padding:'14px 16px', borderBottom:`1px solid ${C.border}` }}>
+              <div style=${{ fontSize:22, marginRight:10 }}>${meal.icon}</div>
+              <div style=${{ flex:1 }}>
+                <div style=${{ fontWeight:700, color:C.text, fontSize:15 }}>${meal.label}</div>
+                <div style=${{ fontSize:11, color:C.faint }}>${meal.time} · cel: ${meal.goal} kcal</div>
+              </div>
+              <div style=${{ textAlign:'right', marginRight:12 }}>
+                <div style=${{ fontWeight:800, color:over?C.red:mCal===0?C.faint:C.green, fontSize:16 }}>${mCal}</div>
+                <div style=${{ fontSize:10, color:C.faint }}>/ ${meal.goal} kcal</div>
+              </div>
+              <button onClick=${()=>setAddingMeal(meal.id)} style=${{ background:C.green, border:'none', color:C.greenDark, borderRadius:10, width:34, height:34, fontSize:20, cursor:'pointer', fontWeight:800, display:'flex', alignItems:'center', justifyContent:'center' }}>+</button>
+            </div>
+            ${mEnt.map(entry => html`
+              <div key=${entry.id} style=${{ display:'flex', alignItems:'center', padding:'10px 16px', borderBottom:'1px solid #0f180f' }}>
+                <div style=${{ flex:1 }}>
+                  <div style=${{ color:'#d1d5db', fontSize:14, fontWeight:500 }}>${entry.name}</div>
+                  <div style=${{ fontSize:11, color:C.faint }}>
+                    ${entry.time}${entry.weight?` · ${entry.weight}g`:''} · B:${Math.round(entry.protein)}g W:${Math.round(entry.carbs)}g T:${Math.round(entry.fat)}g
+                  </div>
+                </div>
+                <div style=${{ color:C.green, fontWeight:700, fontSize:14, marginRight:10 }}>${entry.calories} kcal</div>
+                <button onClick=${()=>removeEntry(entry.id)} style=${{ background:'none', border:'none', color:C.faint, cursor:'pointer', fontSize:16, padding:'4px 6px' }}>✕</button>
+              </div>`)}
+            <div style=${{ padding:'10px 16px' }}>
+              <${SuggestionPanel} mealId=${meal.id} allEntries=${entries} remainingCal=${profile.dailyGoal-totalCal} nextMeal=${MEALS[idx+1]||null}/>
+            </div>
+          </div>`;
+      })}
+
+      <div style=${{ position:'fixed', bottom:0, left:'50%', transform:'translateX(-50%)', width:'100%', maxWidth:480, background:'#0a140a', borderTop:`1px solid ${C.border}`, display:'flex', padding:'10px 0 20px' }}>
+        ${nav.map(([icon,label,sc]) => html`
+          <button key=${sc} onClick=${()=>setScreen(sc)} style=${{ flex:1, background:'none', border:'none', cursor:'pointer', display:'flex', flexDirection:'column', alignItems:'center', gap:2 }}>
+            <span style=${{ fontSize:19 }}>${icon}</span>
+            <span style=${{ fontSize:9, color:screen===sc?C.green:C.dim, fontWeight:screen===sc?700:400, letterSpacing:0.3 }}>${label}</span>
+          </button>`)}
+      </div>
+
+      ${addingMeal && html`
+        <${AddFoodModal}
+          onClose=${()=>setAddingMeal(null)}
+          onAdd=${food=>{ addEntry(addingMeal,food); setAddingMeal(null); }}/>`}
+    </div>`;
+}
+
+createRoot(document.getElementById('root')).render(html`<${App}/>`);
+</script>
+</body>
+</html>
